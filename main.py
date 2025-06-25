@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
-from flask_jwt_extended import JWTManager, create_access_token
-from werkzeug.security import generate_password_hash
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from werkzeug.security import generate_password_hash, check_password_hash
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import os
@@ -25,9 +25,13 @@ class Usuario(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     telefone = db.Column(db.String(20), nullable=False)
     senha_hash = db.Column(db.String(256), nullable=False)
+    is_admin = db.Column(db.Boolean, default=False)
 
     def set_senha(self, senha):
         self.senha_hash = generate_password_hash(senha)
+    
+    def check_senha(self, senha):
+        return check_password_hash(self.senha_hash, senha)
 
 @app.route('/usuarios', methods=['POST', 'OPTIONS'])
 def registrar_usuario():
@@ -40,13 +44,17 @@ def registrar_usuario():
     if not dados or not dados.get('email') or not dados.get('senha'):
         return jsonify({'erro': 'Email e senha são obrigatórios'}), 400
     
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", dados['email']):
+        return jsonify({'erro': 'Email inválido'}), 400
+    
     if Usuario.query.filter_by(email=dados['email']).first():
         return jsonify({'erro': 'Email já cadastrado'}), 400
     
     usuario = Usuario(
         nome=dados.get('nome', ''),
         email=dados['email'],
-        telefone=dados.get('telefone', '')
+        telefone=dados.get('telefone', ''),
+        is_admin=dados.get('is_admin', False)
     )
     usuario.set_senha(dados['senha'])
     db.session.add(usuario)
@@ -57,13 +65,13 @@ def registrar_usuario():
         'usuario': {
             'id': usuario.id,
             'nome': usuario.nome,
-            'email': usuario.email
+            'email': usuario.email,
+            'telefone': usuario.telefone,
+            'is_admin': usuario.is_admin
         }
     }), 201
 
-
-# Rotas de Autenticação
-@app.route('/api/login', methods=['POST'])
+@app.route('/login', methods=['POST'])
 def login():
     dados = request.get_json()
     
@@ -87,7 +95,24 @@ def login():
             'is_admin': usuario.is_admin
         }
     }), 200
+
+@app.route('/perfil', methods=['GET'])
+@jwt_required()
+def perfil():
+    usuario_id = get_jwt_identity()
+    usuario = Usuario.query.get(usuario_id)
     
+    if not usuario:
+        return jsonify({'erro': 'Usuário não encontrado'}), 404
+    
+    return jsonify({
+        'id': usuario.id,
+        'nome': usuario.nome,
+        'email': usuario.email,
+        'telefone': usuario.telefone,
+        'is_admin': usuario.is_admin
+    }), 200
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
