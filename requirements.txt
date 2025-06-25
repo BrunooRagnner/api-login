@@ -4,3 +4,4 @@ flask-sqlalchemy
 flask-cors 
 werkzeug 
 python-dotenv 
+gunicorn
