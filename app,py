@@ -1,30 +1,37 @@
 from flask import Flask, request, jsonify
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required,
+    get_jwt_identity, create_refresh_token
+)
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
+from functools import wraps
 import os
 import re
+from datetime import timedelta
 
 app = Flask(__name__)
-CORS(app)  # Habilita CORS para todas as rotas
+CORS(app)
 
 # Configurações
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'sua-chave-secreta-aqui')
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'super-secret-jwt-key')
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)
+app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=30)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///nintendo_burg.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 jwt = JWTManager(app)
 db = SQLAlchemy(app)
-
 # Modelo de Usuário
 class Usuario(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     nome = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     telefone = db.Column(db.String(20), nullable=False)
-    senha_hash = db.Column(db.String(256), nullable=False)
+    endereco = db.Column(db.String(200), nullable=False)
+    senha_hash = db.Column(db.String(256), nullable=False) 
     is_admin = db.Column(db.Boolean, default=False)
 
     def set_senha(self, senha):
@@ -32,6 +39,24 @@ class Usuario(db.Model):
     
     def check_senha(self, senha):
         return check_password_hash(self.senha_hash, senha)
+
+# Decorator para verificar admin
+def admin_required(fn):
+    @wraps(fn)
+    @jwt_required
+    def wrapper(*args, **kwargs):
+        current_user_id = get_jwt_identity()
+        usuario = Usuario.query.get(current_user_id)
+        
+        if not usuario or not usuario.is_admin:
+            return jsonify({'erro': 'Acesso restrito a administradores'}), 403
+        
+        return fn(*args, **kwargs)
+    return wrapper
+
+@app.route('/')
+def index():
+    return jsonify({'mensagem': 'Bem-vindo à API Nintendo Burg!'})
 
 @app.route('/usuarios', methods=['POST', 'OPTIONS'])
 def registrar_usuario():
@@ -47,6 +72,9 @@ def registrar_usuario():
     if not re.match(r"[^@]+@[^@]+\.[^@]+", dados['email']):
         return jsonify({'erro': 'Email inválido'}), 400
     
+    if len(dados['senha']) < 6:
+        return jsonify({'erro': 'Senha deve ter pelo menos 6 caracteres'}), 400
+    
     if Usuario.query.filter_by(email=dados['email']).first():
         return jsonify({'erro': 'Email já cadastrado'}), 400
     
@@ -54,11 +82,20 @@ def registrar_usuario():
         nome=dados.get('nome', ''),
         email=dados['email'],
         telefone=dados.get('telefone', ''),
+        endereco=dados.get('endereco', ''),
         is_admin=dados.get('is_admin', False)
     )
     usuario.set_senha(dados['senha'])
     db.session.add(usuario)
-    db.session.commit()
+    
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'erro': 'Erro ao registrar usuário', 'detalhes': str(e)}), 500
+    
+    access_token = create_access_token(identity=usuario.id)
+    refresh_token = create_refresh_token(identity=usuario.id)
     
     return jsonify({
         'mensagem': 'Usuário registrado com sucesso',
@@ -67,8 +104,11 @@ def registrar_usuario():
             'nome': usuario.nome,
             'email': usuario.email,
             'telefone': usuario.telefone,
+            'endereco': usuario.endereco,
             'is_admin': usuario.is_admin
-        }
+        },
+        'access_token': access_token,
+        'refresh_token': refresh_token
     }), 201
 
 @app.route('/login', methods=['POST'])
@@ -83,10 +123,13 @@ def login():
     if not usuario or not usuario.check_senha(dados['senha']):
         return jsonify({'erro': 'Credenciais inválidas'}), 401
     
-    token = create_access_token(identity=usuario.id)
+    access_token = create_access_token(identity=usuario.id)
+    refresh_token = create_refresh_token(identity=usuario.id)
+    
     return jsonify({
         'mensagem': 'Login bem-sucedido',
-        'token': token,
+        'access_token': access_token,
+        'refresh_token': refresh_token,
         'usuario': {
             'id': usuario.id,
             'nome': usuario.nome,
@@ -96,7 +139,15 @@ def login():
         }
     }), 200
 
-@app.route('/perfil', methods=['GET'])
+@app.route('/refresh', methods=['POST'])
+@jwt_required(refresh=True)  # Alterado para a nova sintaxe
+def refresh():
+    current_user_id = get_jwt_identity()
+    new_token = create_access_token(identity=current_user_id)
+    return jsonify({'access_token': new_token}), 200
+
+
+@app.route('/perfil', methods=['GET', 'PUT'])
 @jwt_required()
 def perfil():
     usuario_id = get_jwt_identity()
@@ -105,13 +156,111 @@ def perfil():
     if not usuario:
         return jsonify({'erro': 'Usuário não encontrado'}), 404
     
-    return jsonify({
-        'id': usuario.id,
-        'nome': usuario.nome,
-        'email': usuario.email,
-        'telefone': usuario.telefone,
-        'is_admin': usuario.is_admin
-    }), 200
+    if request.method == 'GET':
+        return jsonify({
+            'id': usuario.id,
+            'nome': usuario.nome,
+            'email': usuario.email,
+            'telefone': usuario.telefone,
+            'endereco': usuario.endereco,
+            'is_admin': usuario.is_admin
+        }), 200
+    
+    if request.method == 'PUT':
+        dados = request.get_json()
+        
+        if 'email' in dados and dados['email'] != usuario.email:
+            if Usuario.query.filter_by(email=dados['email']).first():
+                return jsonify({'erro': 'Email já está em uso'}), 400
+            usuario.email = dados['email']
+        
+        if 'senha' in dados:
+            if len(dados['senha']) < 6:
+                return jsonify({'erro': 'Senha deve ter pelo menos 6 caracteres'}), 400
+            usuario.set_senha(dados['senha'])
+        
+        usuario.nome = dados.get('nome', usuario.nome)
+        usuario.telefone = dados.get('telefone', usuario.telefone)
+        usuario.endereco = dados.get('endereco', usuario.endereco)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'mensagem': 'Perfil atualizado com sucesso',
+            'usuario': {
+                'id': usuario.id,
+                'nome': usuario.nome,
+                'email': usuario.email,
+                'telefone': usuario.telefone,
+                'endereco': usuario.endereco,
+                'is_admin': usuario.is_admin
+            }
+        }), 200
+
+@app.route('/admin/usuarios', methods=['GET'])
+@admin_required
+def listar_usuarios():
+    usuarios = Usuario.query.all()
+    return jsonify([{
+        'id': u.id,
+        'nome': u.nome,
+        'email': u.email,
+        'telefone': u.telefone,
+        'is_admin': u.is_admin
+    } for u in usuarios]), 200
+
+@app.route('/admin/usuarios/<int:usuario_id>', methods=['GET', 'PUT', 'DELETE'])
+@admin_required
+def gerenciar_usuario(usuario_id):
+    usuario = Usuario.query.get_or_404(usuario_id)
+    
+    if request.method == 'GET':
+        return jsonify({
+            'id': usuario.id,
+            'nome': usuario.nome,
+            'email': usuario.email,
+            'telefone': usuario.telefone,
+            'endereco': usuario.endereco,
+            'is_admin': usuario.is_admin
+        }), 200
+    
+    if request.method == 'PUT':
+        dados = request.get_json()
+        
+        if 'email' in dados and dados['email'] != usuario.email:
+            if Usuario.query.filter_by(email=dados['email']).first():
+                return jsonify({'erro': 'Email já está em uso'}), 400
+            usuario.email = dados['email']
+        
+        if 'senha' in dados:
+            usuario.set_senha(dados['senha'])
+        
+        usuario.nome = dados.get('nome', usuario.nome)
+        usuario.telefone = dados.get('telefone', usuario.telefone)
+        usuario.endereco = dados.get('endereco', usuario.endereco)
+        usuario.is_admin = dados.get('is_admin', usuario.is_admin)
+        
+        db.session.commit()
+        
+        return jsonify({'mensagem': 'Usuário atualizado com sucesso'}), 200
+    
+    if request.method == 'DELETE':
+        if usuario.id == get_jwt_identity():
+            return jsonify({'erro': 'Você não pode deletar sua própria conta'}), 400
+        
+        db.session.delete(usuario)
+        db.session.commit()
+        return jsonify({'mensagem': 'Usuário deletado com sucesso'}), 200
+
+# Tratamento de erros
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'erro': 'Recurso não encontrado'}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    db.session.rollback()
+    return jsonify({'erro': 'Erro interno do servidor'}), 500
 
 if __name__ == '__main__':
     with app.app_context():
