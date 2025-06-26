@@ -21,7 +21,7 @@ CORS(app, resources={
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'sua-chave-secreta')
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'super-secret')
 
-# Caminho para banco local SQLite ou DATABASE_URL se existir
+# Caminho para SQLite (caso DATABASE_URL não esteja definido)
 basedir = os.path.abspath(os.path.dirname(__file__))
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
     'DATABASE_URL',
@@ -29,7 +29,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Extensões
+# Inicialização de extensões
 jwt = JWTManager(app)
 db = SQLAlchemy(app)
 
@@ -47,9 +47,8 @@ class User(db.Model):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
-# Criar tabelas automaticamente no primeiro acesso
-@app.before_first_request
-def create_tables():
+# ✅ Criação do banco (funciona no Render)
+with app.app_context():
     db.create_all()
 
 # Rotas
@@ -103,7 +102,6 @@ def login():
         return jsonify({"error": "Email e senha são obrigatórios"}), 400
 
     user = User.query.filter_by(email=data['email']).first()
-
     if not user or not user.check_password(data['password']):
         return jsonify({"error": "Email ou senha incorretos"}), 401
 
