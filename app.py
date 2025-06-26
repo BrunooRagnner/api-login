@@ -20,10 +20,16 @@ CORS(app, resources={
 # Configurações
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'sua-chave-secreta')
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'super-secret')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
 
+# Caminho para banco local SQLite ou DATABASE_URL se existir
+basedir = os.path.abspath(os.path.dirname(__file__))
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
+    'DATABASE_URL',
+    f'sqlite:///{os.path.join(basedir, "app.db")}'
+)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# Extensões
 jwt = JWTManager(app)
 db = SQLAlchemy(app)
 
@@ -41,29 +47,31 @@ class User(db.Model):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
-# Rotas da API
+# Criar tabelas automaticamente no primeiro acesso
+@app.before_first_request
+def create_tables():
+    db.create_all()
+
+# Rotas
 @app.route('/api/register', methods=['POST', 'OPTIONS'])
 def register():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
-        
+
     data = request.get_json()
-    
-    # Validações
     required_fields = ['nome', 'email', 'telefone', 'password', 'confirmar_senha']
     if not all(field in data for field in required_fields):
         return jsonify({"error": "Todos os campos são obrigatórios"}), 400
-    
+
     if data['password'] != data['confirmar_senha']:
         return jsonify({"error": "As senhas não coincidem"}), 400
-    
+
     if len(data['password']) < 6:
         return jsonify({"error": "Senha deve ter pelo menos 6 caracteres"}), 400
-    
+
     if User.query.filter_by(email=data['email']).first():
         return jsonify({"error": "Email já cadastrado"}), 400
-    
-    # Cria usuário
+
     user = User(
         nome=data['nome'],
         email=data['email'],
@@ -72,10 +80,8 @@ def register():
     user.set_password(data['password'])
     db.session.add(user)
     db.session.commit()
-    
-    # Cria token JWT automaticamente após registro
+
     access_token = create_access_token(identity=user.email)
-    
     return jsonify({
         "message": "Usuário registrado com sucesso",
         "access_token": access_token,
@@ -91,40 +97,36 @@ def register():
 def login():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
-        
-    try:
-        data = request.get_json()
-        if not data or not data.get('email') or not data.get('password'):
-            return jsonify({"error": "Email e senha são obrigatórios"}), 400
-        
-        user = User.query.filter_by(email=data['email']).first()
-        
-        if not user or not user.check_password(data['password']):
-            return jsonify({"error": "Email ou senha incorretos"}), 401
-        
-        access_token = create_access_token(identity=user.email)
-        return jsonify({
-            "access_token": access_token,
-            "user": {
-                "id": user.id,
-                "nome": user.nome,
-                "email": user.email,
-                "telefone": user.telefone
-            }
-        }), 200
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+
+    data = request.get_json()
+    if not data or not data.get('email') or not data.get('password'):
+        return jsonify({"error": "Email e senha são obrigatórios"}), 400
+
+    user = User.query.filter_by(email=data['email']).first()
+
+    if not user or not user.check_password(data['password']):
+        return jsonify({"error": "Email ou senha incorretos"}), 401
+
+    access_token = create_access_token(identity=user.email)
+    return jsonify({
+        "access_token": access_token,
+        "user": {
+            "id": user.id,
+            "nome": user.nome,
+            "email": user.email,
+            "telefone": user.telefone
+        }
+    }), 200
 
 @app.route('/api/protected', methods=['GET'])
 @jwt_required()
 def protected():
     current_user_email = get_jwt_identity()
     user = User.query.filter_by(email=current_user_email).first()
-    
+
     if not user:
         return jsonify({"error": "Usuário não encontrado"}), 404
-        
+
     return jsonify({
         "id": user.id,
         "nome": user.nome,
@@ -132,11 +134,6 @@ def protected():
         "telefone": user.telefone
     }), 200
 
-
-
+# Rodar localmente (opcional)
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-
-
-
+    app.run(debug=True)
