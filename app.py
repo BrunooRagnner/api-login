@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify
 from flask_jwt_extended import (
     JWTManager, jwt_required, create_access_token,
@@ -10,7 +9,13 @@ from flask_cors import CORS
 import os
 
 app = Flask(__name__)
-CORS(app)  # Habilita CORS para o frontend
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 
 # Configurações
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'sua-chave-secreta')
@@ -24,7 +29,9 @@ db = SQLAlchemy(app)
 # Modelo de Usuário
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    nome = db.Column(db.String(120), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
+    telefone = db.Column(db.String(20))
     password_hash = db.Column(db.String(256), nullable=False)
 
     def set_password(self, password):
@@ -34,13 +41,20 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
 # Rotas da API
-@app.route('/api/register', methods=['POST'])
+@app.route('/api/register', methods=['POST', 'OPTIONS'])
 def register():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+        
     data = request.get_json()
     
     # Validações
-    if not data or not data.get('email') or not data.get('password'):
-        return jsonify({"error": "Email e senha são obrigatórios"}), 400
+    required_fields = ['nome', 'email', 'telefone', 'password', 'confirmar_senha']
+    if not all(field in data for field in required_fields):
+        return jsonify({"error": "Todos os campos são obrigatórios"}), 400
+    
+    if data['password'] != data['confirmar_senha']:
+        return jsonify({"error": "As senhas não coincidem"}), 400
     
     if len(data['password']) < 6:
         return jsonify({"error": "Senha deve ter pelo menos 6 caracteres"}), 400
@@ -49,15 +63,34 @@ def register():
         return jsonify({"error": "Email já cadastrado"}), 400
     
     # Cria usuário
-    user = User(email=data['email'])
+    user = User(
+        nome=data['nome'],
+        email=data['email'],
+        telefone=data['telefone']
+    )
     user.set_password(data['password'])
     db.session.add(user)
     db.session.commit()
     
-    return jsonify({"message": "Usuário registrado com sucesso"}), 201
+    # Cria token JWT automaticamente após registro
+    access_token = create_access_token(identity=user.email)
+    
+    return jsonify({
+        "message": "Usuário registrado com sucesso",
+        "access_token": access_token,
+        "user": {
+            "id": user.id,
+            "nome": user.nome,
+            "email": user.email,
+            "telefone": user.telefone
+        }
+    }), 201
 
-@app.route('/api/login', methods=['POST'])
+@app.route('/api/login', methods=['POST', 'OPTIONS'])
 def login():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+        
     data = request.get_json()
     
     if not data or not data.get('email') or not data.get('password'):
@@ -72,16 +105,31 @@ def login():
     access_token = create_access_token(identity=user.email)
     return jsonify({
         "access_token": access_token,
-        "email": user.email
+        "user": {
+            "id": user.id,
+            "nome": user.nome,
+            "email": user.email,
+            "telefone": user.telefone
+        }
     }), 200
 
 @app.route('/api/protected', methods=['GET'])
 @jwt_required()
 def protected():
-    current_user = get_jwt_identity()
-    return jsonify(logged_in_as=current_user), 200
+    current_user_email = get_jwt_identity()
+    user = User.query.filter_by(email=current_user_email).first()
+    
+    if not user:
+        return jsonify({"error": "Usuário não encontrado"}), 404
+        
+    return jsonify({
+        "id": user.id,
+        "nome": user.nome,
+        "email": user.email,
+        "telefone": user.telefone
+    }), 200
 
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=True)
