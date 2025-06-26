@@ -18,7 +18,7 @@ CORS(app, resources={
 })
 
 # Configurações
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'sua-chave-secreta')
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'manf123')
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'super-secret')
 
 # Caminho para SQLite (caso DATABASE_URL não esteja definido)
@@ -52,6 +52,10 @@ with app.app_context():
     db.create_all()
 
 # Rotas
+
+@app.route('/')
+def index():
+    return'api on-line'
 @app.route('/api/register', methods=['POST', 'OPTIONS'])
 def register():
     if request.method == 'OPTIONS':
